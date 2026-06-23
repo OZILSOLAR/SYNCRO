@@ -1,4 +1,4 @@
-import { deriveStealthAddress } from '../../shared/src/crypto/stealth-derive';
+import { deriveStealthAddress, encodeMemoWithEphemeralPubkey, decodeMemoToEphemeralPubkey, isStellarMemoStealth } from '../../shared/src/crypto/stealth-derive';
 
 // ── deriveStealthAddress unit tests ──────────────────────────────────────────
 
@@ -37,6 +37,56 @@ describe('deriveStealthAddress', () => {
 
   it('throws RangeError for non-integer index', () => {
     expect(() => deriveStealthAddress(META, SUB_ID, 1.5)).toThrow(RangeError);
+  });
+});
+
+// ── Stealth memo encoding/decoding tests ────────────────────────────────────
+
+describe('Stealth Memo Encoding', () => {
+  const MOCK_PUBKEY = '0'.repeat(64); // 32 bytes in hex
+
+  it('encodes ephemeral pubkey to base64 memo', () => {
+    const encoded = encodeMemoWithEphemeralPubkey(MOCK_PUBKEY);
+    expect(typeof encoded).toBe('string');
+    expect(encoded.length).toBeGreaterThan(0);
+  });
+
+  it('decodes memo back to original pubkey', () => {
+    const encoded = encodeMemoWithEphemeralPubkey(MOCK_PUBKEY);
+    const decoded = decodeMemoToEphemeralPubkey(encoded);
+    expect(decoded).toBe(MOCK_PUBKEY);
+  });
+
+  it('detects stealth memo prefix correctly', () => {
+    const encoded = encodeMemoWithEphemeralPubkey(MOCK_PUBKEY);
+    expect(isStellarMemoStealth(encoded)).toBe(true);
+  });
+
+  it('rejects invalid memo (wrong prefix)', () => {
+    const nonStealthMemo = Buffer.from('INVALID_PREFIX' + '0'.repeat(32)).toString('base64');
+    expect(isStellarMemoStealth(nonStealthMemo)).toBe(false);
+    expect(decodeMemoToEphemeralPubkey(nonStealthMemo)).toBe(null);
+  });
+
+  it('rejects malformed base64', () => {
+    const malformed = '!!!invalid_base64!!!';
+    expect(isStellarMemoStealth(malformed)).toBe(false);
+    expect(decodeMemoToEphemeralPubkey(malformed)).toBe(null);
+  });
+
+  it('throws error for invalid pubkey length', () => {
+    const shortPubkey = '0'.repeat(62); // 31 bytes instead of 32
+    expect(() => encodeMemoWithEphemeralPubkey(shortPubkey)).toThrow();
+  });
+
+  it('round-trip with different pubkeys produces different memos', () => {
+    const pubkey1 = '0'.repeat(64);
+    const pubkey2 = '1'.repeat(64);
+    const memo1 = encodeMemoWithEphemeralPubkey(pubkey1);
+    const memo2 = encodeMemoWithEphemeralPubkey(pubkey2);
+    expect(memo1).not.toBe(memo2);
+    expect(decodeMemoToEphemeralPubkey(memo1)).toBe(pubkey1);
+    expect(decodeMemoToEphemeralPubkey(memo2)).toBe(pubkey2);
   });
 });
 

@@ -2,6 +2,8 @@ import logger from '../config/logger';
 import { supabase } from '../config/database';
 import { blockchainService } from './blockchain-service';
 import { webhookService } from './webhook-service';
+import { stealthScanner } from './stealth-scanner';
+import { encodeMemoWithEphemeralPubkey } from '../../../shared/src/crypto/stealth-derive';
 import { addMonths, addQuarters, addYears } from 'date-fns';
 
 interface RenewalRequest {
@@ -9,6 +11,7 @@ interface RenewalRequest {
   userId: string;
   approvalId: string;
   amount: number;
+  ephemeralPubkey?: string; // Optional stealth ephemeral public key
 }
 
 interface RenewalResult {
@@ -21,7 +24,7 @@ interface RenewalResult {
 
 export class RenewalExecutor {
   async executeRenewal(request: RenewalRequest): Promise<RenewalResult> {
-    const { subscriptionId, userId, approvalId, amount } = request;
+    const { subscriptionId, userId, approvalId, amount, ephemeralPubkey } = request;
 
     try {
       // Step 1: Check approval
@@ -36,11 +39,12 @@ export class RenewalExecutor {
         return await this.logFailure(subscriptionId, userId, 'billing_window_invalid', billingWindow.reason);
       }
 
-      // Step 3: Trigger contract renewal
+      // Step 3: Trigger contract renewal with stealth memo if provided
       const contractResult = await this.triggerContractRenewal(
         subscriptionId,
         approvalId,
-        amount
+        amount,
+        ephemeralPubkey
       );
 
       if (!contractResult.success) {
@@ -48,9 +52,15 @@ export class RenewalExecutor {
       }
 
       // Step 4: Update DB
-      await this.updateSubscription(subscriptionId, contractResult.transactionHash);
+      const billingCycle = billingWindow.billingCycle || 'monthly';
+      await this.updateSubscription(subscriptionId, billingCycle, contractResult.transactionHash);
 
-      // Step 5: Log result
+      // Step 5: Record stealth payment if using stealth mode
+      if (ephemeralPubkey && contractResult.transactionHash) {
+        await this.recordStealthPayment(contractResult.transactionHash, ephemeralPubkey, subscriptionId);
+      }
+
+      // Step 6: Log result
       await this.logSuccess(subscriptionId, userId, contractResult.transactionHash);
 
       return {
@@ -147,15 +157,28 @@ export class RenewalExecutor {
   private async triggerContractRenewal(
     subscriptionId: string,
     approvalId: string,
-    amount: number
+    amount: number,
+    ephemeralPubkey?: string
   ): Promise<{ success: boolean; transactionHash?: string; error?: string }> {
     try {
-      // Simulate contract interaction via blockchainService
+      let memoOptions: Record<string, string> = {};
+      
+      // If ephemeral pubkey provided, encode it in the stealth memo format
+      if (ephemeralPubkey) {
+        try {
+          memoOptions.stealthMemo = encodeMemoWithEphemeralPubkey(ephemeralPubkey);
+          logger.info('Encoding stealth memo for payment:', { subscriptionId, pubkeyPrefix: ephemeralPubkey.substring(0, 8) });
+        } catch (err) {
+          logger.warn('Failed to encode stealth memo, proceeding without:', err);
+        }
+      }
+
+      // Call blockchain service with memo options
       const result = await blockchainService.syncSubscription(
         subscriptionId,
         subscriptionId,
         'update',
-        { status: 'renewed', amount }
+        { status: 'renewed', amount, ...memoOptions }
       );
 
       return {
@@ -168,6 +191,27 @@ export class RenewalExecutor {
         success: false,
         error: error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  private async recordStealthPayment(
+    transactionHash: string,
+    ephemeralPubkey: string,
+    subscriptionId: string
+  ): Promise<void> {
+    try {
+      await stealthScanner.recordStealthPayment(
+        {
+          transactionHash,
+          ledgerSequence: 0, // Will be updated when scanned from ledger
+          ephemeralPubkey,
+          timestamp: new Date().toISOString(),
+        },
+        subscriptionId
+      );
+    } catch (err) {
+      logger.warn('Failed to record stealth payment:', err);
+      // Non-critical: continue without recording
     }
   }
 
