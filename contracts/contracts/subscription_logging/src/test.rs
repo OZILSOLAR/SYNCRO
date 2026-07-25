@@ -110,6 +110,225 @@ fn test_get_commitments_range_too_large() {
 }
 
 // ============================================================================
+// BOUNDS TESTS FOR DoS PREVENTION (Issue #1063)
+// ============================================================================
+
+#[test]
+fn test_get_commitments_range_off_by_one_lower() {
+    let (env, _admin, client) = create_test_env();
+
+    // Record 10 commitments (indices 0-9)
+    for i in 0..10u8 {
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = i;
+        let commitment_hash = BytesN::from_array(&env, &hash_bytes);
+        client.record_commitment(&commitment_hash);
+    }
+
+    // Query single commitment at boundary
+    let range = client.get_commitments_range(&9, &9);
+    assert_eq!(range.len(), 1);
+    assert_eq!(range.get(0).unwrap().commitment_index, 9);
+}
+
+#[test]
+fn test_get_commitments_range_off_by_one_upper() {
+    let (env, _admin, client) = create_test_env();
+
+    // Record 10 commitments (indices 0-9)
+    for i in 0..10u8 {
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = i;
+        let commitment_hash = BytesN::from_array(&env, &hash_bytes);
+        client.record_commitment(&commitment_hash);
+    }
+
+    // Query range inclusive of last valid index
+    let range = client.get_commitments_range(&8, &9);
+    assert_eq!(range.len(), 2);
+    assert_eq!(range.get(0).unwrap().commitment_index, 8);
+    assert_eq!(range.get(1).unwrap().commitment_index, 9);
+}
+
+#[test]
+#[should_panic(expected = "end_index exceeds commitment count")]
+fn test_get_commitments_range_exceeds_count() {
+    let (env, _admin, client) = create_test_env();
+
+    // Record 5 commitments (valid indices 0-4)
+    for i in 0..5u8 {
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = i;
+        let commitment_hash = BytesN::from_array(&env, &hash_bytes);
+        client.record_commitment(&commitment_hash);
+    }
+
+    // Attempt to query index 5 which doesn't exist
+    client.get_commitments_range(&0, &5);
+}
+
+#[test]
+#[should_panic(expected = "start_index must be <= end_index")]
+fn test_get_commitments_range_invalid_order() {
+    let (_env, _admin, client) = create_test_env();
+
+    // Attempt invalid range where start > end
+    client.get_commitments_range(&10, &5);
+}
+
+#[test]
+fn test_get_commitments_range_max_exactly_100() {
+    let (env, _admin, client) = create_test_env();
+
+    // Record 100 commitments
+    for i in 0..100u8 {
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = i;
+        let commitment_hash = BytesN::from_array(&env, &hash_bytes);
+        client.record_commitment(&commitment_hash);
+    }
+
+    // Query exactly 100 commitments should succeed
+    let range = client.get_commitments_range(&0, &99);
+    assert_eq!(range.len(), 100);
+}
+
+#[test]
+#[should_panic(expected = "Range too large")]
+fn test_get_commitments_range_exceeds_max_101() {
+    let (env, _admin, client) = create_test_env();
+
+    // Record 101 commitments
+    for i in 0..101u8 {
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = i;
+        let commitment_hash = BytesN::from_array(&env, &hash_bytes);
+        client.record_commitment(&commitment_hash);
+    }
+
+    // Attempt to query 101 commitments (just over limit)
+    client.get_commitments_range(&0, &100);
+}
+
+#[test]
+#[should_panic(expected = "Invalid range: end_index must be >= start_index")]
+fn test_anchor_merkle_root_invalid_range() {
+    let (env, _admin, client) = create_test_env();
+
+    let root_hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    // Attempt to anchor with invalid range (end < start)
+    client.anchor_merkle_root(&root_hash, &10, &5);
+}
+
+#[test]
+#[should_panic(expected = "end_index exceeds commitment count")]
+fn test_anchor_merkle_root_exceeds_count() {
+    let (env, _admin, client) = create_test_env();
+
+    // Record 5 commitments
+    for i in 0..5u8 {
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = i;
+        let commitment_hash = BytesN::from_array(&env, &hash_bytes);
+        client.record_commitment(&commitment_hash);
+    }
+
+    let root_hash = BytesN::from_array(&env, &[42u8; 32]);
+
+    // Attempt to anchor with end_index beyond commitment count
+    client.anchor_merkle_root(&root_hash, &0, &100);
+}
+
+#[test]
+fn test_anchor_merkle_root_valid_range() {
+    let (env, _admin, client) = create_test_env();
+
+    // Record 10 commitments
+    for i in 0..10u8 {
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = i;
+        let commitment_hash = BytesN::from_array(&env, &hash_bytes);
+        client.record_commitment(&commitment_hash);
+    }
+
+    let root_hash = BytesN::from_array(&env, &[42u8; 32]);
+
+    // Valid anchor with inclusive range
+    client.anchor_merkle_root(&root_hash, &0, &9);
+
+    // Verify it was stored
+    let root = client.get_merkle_root(&0).unwrap();
+    assert_eq!(root.start_index, 0);
+    assert_eq!(root.end_index, 9);
+}
+
+// ============================================================================
+// LOG CAP TESTS FOR per-subscription DoS PREVENTION
+// ============================================================================
+
+#[test]
+fn test_record_log_within_cap() {
+    let (env, _admin, client) = create_test_env();
+
+    let subscription_id = 1u64;
+
+    // Record logs up to (but not including) the cap
+    for i in 0..999 {
+        let data = String::from_slice(&env, &format!("Event {}", i).as_bytes());
+        client.record_log(&subscription_id, &LogEvent::Renewal, &data);
+    }
+
+    // Should have 999 logs
+    let logs = client.get_logs(&subscription_id);
+    assert_eq!(logs.len(), 999);
+}
+
+#[test]
+#[should_panic(expected = "Log capacity exceeded")]
+fn test_record_log_exceeds_cap() {
+    let (env, _admin, client) = create_test_env();
+
+    let subscription_id = 1u64;
+
+    // Record exactly 1000 logs (at cap)
+    for i in 0..1000 {
+        let data = String::from_slice(&env, &format!("Event {}", i).as_bytes());
+        client.record_log(&subscription_id, &LogEvent::Renewal, &data);
+    }
+
+    // Attempt to record 1001st log (should panic)
+    let data = String::from_slice(&env, "Overflow event");
+    client.record_log(&subscription_id, &LogEvent::Renewal, &data);
+}
+
+#[test]
+fn test_record_log_independent_subscription_caps() {
+    let (env, _admin, client) = create_test_env();
+
+    // Record logs for subscription 1
+    for i in 0..500 {
+        let data = String::from_slice(&env, &format!("Sub1 Event {}", i).as_bytes());
+        client.record_log(&1u64, &LogEvent::Renewal, &data);
+    }
+
+    // Record logs for subscription 2
+    for i in 0..500 {
+        let data = String::from_slice(&env, &format!("Sub2 Event {}", i).as_bytes());
+        client.record_log(&2u64, &LogEvent::Approval, &data);
+    }
+
+    // Both should have 500 logs independently
+    assert_eq!(client.get_logs(&1u64).len(), 500);
+    assert_eq!(client.get_logs(&2u64).len(), 500);
+
+    // Subscription 1 can still add more (total 500 < 1000 cap)
+    let data = String::from_slice(&env, "Sub1 extra");
+    client.record_log(&1u64, &LogEvent::Cancellation, &data);
+    assert_eq!(client.get_logs(&1u64).len(), 501);
+}
+
+// ============================================================================
 // COMMITMENT PRIVACY TESTS
 // ============================================================================
 

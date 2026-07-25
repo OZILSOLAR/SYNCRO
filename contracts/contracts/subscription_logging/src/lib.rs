@@ -134,12 +134,21 @@ impl SubscriptionLoggingContract {
     // LEGACY PLAINTEXT LOGGING (Deprecated, kept for backward compatibility)
     // ========================================================================
 
+    /// Maximum number of log entries allowed per subscription (legacy plaintext)
+    /// Prevents unbounded growth of storage per subscription.
+    const LOG_CAP_PER_SUBSCRIPTION: u32 = 1000;
+
     pub fn record_log(env: Env, sub_id: u64, event: LogEvent, data: String) {
         Self::require_admin(&env);
 
         let key = DataKey::Logs(sub_id);
 
         let mut logs: Vec<LogEntry> = env.storage().persistent().get(&key).unwrap_or(vec![&env]);
+
+        // Enforce per-subscription log cap
+        if logs.len() >= Self::LOG_CAP_PER_SUBSCRIPTION as usize {
+            panic!("Log capacity exceeded for subscription (max 1000 entries)");
+        }
 
         let entry = LogEntry {
             sub_id,
@@ -244,16 +253,34 @@ impl SubscriptionLoggingContract {
     /// * `Vec<AuditCommitment>` - Vector of commitments in range
     ///
     /// # Limits
-    /// Maximum 100 commitments per query to prevent excessive compute
+    /// - Maximum 100 commitments per query to prevent excessive compute
+    /// - end_index must be >= start_index
+    /// - Both indices must be valid (within commitment count)
+    ///
+    /// # Panics
+    /// - If range_size > 100
+    /// - If start_index > end_index (validated in bounds check)
     pub fn get_commitments_range(
         env: Env,
         start_index: u64,
         end_index: u64,
     ) -> Vec<AuditCommitment> {
-        // Enforce reasonable limits
-        let range_size = end_index.saturating_sub(start_index) + 1;
+        // Validate range bounds
+        if start_index > end_index {
+            panic!("Invalid range: start_index must be <= end_index");
+        }
+
+        // Enforce reasonable limits (prevent off-by-one DoS)
+        // Range is inclusive on both ends: [start, end] has size (end - start + 1)
+        let range_size = end_index.saturating_sub(start_index).saturating_add(1);
         if range_size > 100 {
             panic!("Range too large, maximum 100 commitments per query");
+        }
+
+        // Verify end_index doesn't exceed commitment count
+        let commitment_count = Self::get_commitment_count(env.clone());
+        if commitment_count > 0 && end_index >= commitment_count {
+            panic!("end_index exceeds commitment count");
         }
 
         let mut results = vec![&env];
